@@ -1,0 +1,44 @@
+#!/usr/bin/env python
+#
+# Print statistics on the objects for a given ref/commit in an OSTree repo
+#
+# Copyright 2015 Colin Walters <walters@verbum.org>
+# Licensed under the new-BSD license (http://www.opensource.org/licenses/bsd-license.php)
+
+import sys
+from gi.repository import GLib, Gio, OSTree
+
+repopath = sys.argv[1]
+ref = sys.argv[2]
+
+r = OSTree.Repo.new(Gio.File.new_for_path(repopath))
+r.open(None)
+
+[_,rev] = r.resolve_rev(ref, False)
+
+print "%s => %s" % (ref, rev)
+reachable = OSTree.Repo.traverse_new_reachable()
+[_,reachable] = r.traverse_commit(rev, 0, None)
+total = 0
+n_meta = 0
+n_content = 0
+buckets = {}
+for k,v in reachable.iteritems():
+    csum,objtype = k.unpack()
+    if objtype == OSTree.ObjectType.FILE:
+        [_,_,finfo,_] = r.load_file(csum, None)
+        n_content += 1
+        sz = finfo.get_size()
+    else:
+        [_,sz] = r.query_object_storage_size(objtype, csum, None)
+        n_meta += 1
+    sz_mb = sz / (1000*1000)
+    [n,s] = buckets.get(sz_mb, [0,0])
+    buckets[sz_mb] = (n+1, s+sz)
+    total += sz
+
+print "Meta: {0} Content: {1}".format(n_meta, n_content)
+for v in sorted(buckets.keys()):
+    [n,s] = buckets[v]
+    print "%s => %s (%s MB)" % (v, n, s/(1000*1000))
+print "Total: {0} MB".format(total / (1000*1000))
