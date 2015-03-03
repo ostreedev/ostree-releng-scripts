@@ -1,0 +1,27 @@
+#!/usr/bin/env python
+#
+# Verify a GPG signature manually
+#
+# Copyright 2015 Colin Walters <walters@verbum.org>
+# Licensed under the new-BSD license (http://www.opensource.org/licenses/bsd-license.php)
+
+import sys
+from gi.repository import GLib, Gio, OSTree
+
+repopath = sys.argv[1]
+ref = sys.argv[2]
+
+r = OSTree.Repo.new(Gio.File.new_for_path(repopath))
+r.open(None)
+
+[_,rev] = r.resolve_rev(ref, False)
+
+print "%s => %s" % (ref, rev)
+_,metadata = r.read_commit_detached_metadata(rev, None)
+for k in metadata.keys():
+    if k == 'ostree.gpgsigs':
+        for i,sig in enumerate(metadata[k]):
+            fname = "sig.%d" % (i,)
+            with open(fname, 'w') as f:
+                f.write(bytearray(sig))
+            print "Wrote: " + fname
