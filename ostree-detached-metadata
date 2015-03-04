@@ -18,6 +18,8 @@ parser.add_argument("--key", help="Key name",
                     action='store')
 parser.add_argument("--set-string-file", help="Set the key to have the contents of filename",
                     action='store')
+parser.add_argument("--set-uint64", help="Set the key to have an unsigned 64 bit integer",
+                    action='store')
 parser.add_argument("--delete", help="Remove the key",
                     action='store_true')
 
@@ -32,9 +34,9 @@ if arg.ref != rev:
     print "%s => %s" % (arg.ref, rev)
 _,metadata = r.read_commit_detached_metadata(rev, None)
 if metadata is None:
-    metadata = metadata_copy = {}
+    metadata = new_metadata = {}
 else:
-    metadata_copy = metadata.unpack()
+    new_metadata = {}
 
 arg = parser.parse_args()
 
@@ -46,14 +48,32 @@ if arg.key is None:
         for k in keys:
             print k
 elif arg.delete:
-    del metadata_copy[arg.key]
-    r.write_commit_detached_metadata(rev, GLib.Variant('a{sv}', metadata_copy), None)
+    n = metadata.n_children()
+    for i in xrange(n):
+        child = metadata.get_child_value(i)
+        k = child.get_child_value(0).get_string()
+        v = child.get_child_value(1)
+        if k == arg.key:
+            continue
+        new_metadata[k] = v
+    new_metadatav = GLib.Variant('a{sv}', new_metadata)
+    r.write_commit_detached_metadata(rev, new_metadatav, None)
     print "Deleted key: %s" % (arg.key, )
-elif arg.set_string_file is not None:
-    with open(arg.set_string_file) as f:
-        data = f.read()
-        metadata_copy[arg.key] = GLib.Variant('s', data)
-    r.write_commit_detached_metadata(rev, GLib.Variant('a{sv}', metadata_copy), None)
+elif (arg.set_string_file is not None or arg.set_uint64 is not None):
+    n = metadata.n_children()
+    for i in xrange(n):
+        child = metadata.get_child_value(i)
+        k = child.get_child_value(0).get_string()
+        v = child.get_child_value(1)
+        new_metadata[k] = v
+    if arg.set_string_file is not None:
+        with open(arg.set_string_file) as f:
+            data = f.read()
+            new_metadata[arg.key] = GLib.Variant('s', data)
+    else:
+        new_metadata[arg.key] = GLib.Variant('t', int(arg.set_uint64))
+    new_metadatav = GLib.Variant('a{sv}', new_metadata)
+    r.write_commit_detached_metadata(rev, new_metadatav, None)
     print "Wrote key: %s" % (arg.key, )
 else:
     print metadata[arg.key]
