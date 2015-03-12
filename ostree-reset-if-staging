@@ -48,7 +48,7 @@ while True:
 if iter_rev != rev:
     # We have commits to delete
 
-    print "Resetting {0} to {1} detached metadata key".format(arg.ref, iter_rev)
+    print "Resetting {0} to {1}".format(arg.ref, iter_rev)
     r.set_ref_immediate(None, arg.ref, iter_rev, None)
 
     # Now do a prune
