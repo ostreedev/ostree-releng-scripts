@@ -1,0 +1,65 @@
+#!/usr/bin/env python
+#
+# Remove all commits from a branch that have "redhat.staging"
+# as a detached metadata key.
+#
+# Copyright 2015 Colin Walters <walters@verbum.org>
+# Licensed under the new-BSD license (http://www.opensource.org/licenses/bsd-license.php)
+
+from gi.repository import GLib, Gio, OSTree
+import argparse
+
+staging_key = 'redhat.staging'
+
+def fatal(msg):
+    print >>sys.stderr, msg
+    sys.exit(1)
+
+parser = argparse.ArgumentParser(prog="ostree-edit-detached")
+parser.add_argument("--repo", help="Repo path",
+                    action='store', required=True)
+parser.add_argument("--ref", help="Branch or commit",
+                    action='store', required=True)
+
+arg = parser.parse_args()
+
+r = OSTree.Repo.new(Gio.File.new_for_path(arg.repo))
+r.open(None)
+
+[_,rev] = r.resolve_rev(arg.ref, False)
+print "%s => %s" % (arg.ref, rev)
+
+# Loop across the history, stopping as soon as we find
+# a commit without redhat.staging
+commit = None
+iter_rev = rev
+while True:
+    _,commit = r.load_variant(OSTree.ObjectType.COMMIT, iter_rev)
+    _,metadata = r.read_commit_detached_metadata(iter_rev, None)
+    if (metadata is not None and metadata.unpack().get(staging_key)):
+        iter_rev = OSTree.commit_get_parent(commit)
+        if iter_rev is None:
+            fatal("Found a staging commit but no parent?")
+        # skip this commit
+        continue   
+    else:
+        break
+
+if iter_rev != rev:
+    # We have commits to delete
+
+    print "Resetting {0} to {1} detached metadata key".format(arg.ref, iter_rev)
+    r.set_ref_immediate(None, arg.ref, iter_rev, None)
+
+    # Now do a prune
+    _,nobjs,npruned,objsize = r.prune(OSTree.RepoPruneFlags.REFS_ONLY, -1, None)
+    if npruned == 0:
+        print "No unreachable objects"
+    else:
+        fmtsize = GLib.format_size_full(objsize, 0)
+        print "Deleted {0} objects, {1} freed".format(npruned, fmtsize)
+
+else:
+    # Nothing to do!
+    print "Latest commit {0} for {1} does not have {2} detached metadata key".format(rev, arg.ref, staging_key)
+    
