@@ -18,10 +18,13 @@ r.open(None)
 
 print "%s => %s" % (ref, rev)
 _,metadata = r.read_commit_detached_metadata(rev, None)
-for k in metadata.keys():
-    if k == 'ostree.gpgsigs':
-        for i,sig in enumerate(metadata[k]):
-            fname = "sig.%d" % (i,)
-            with open(fname, 'w') as f:
-                f.write(bytearray(sig))
-            print "Wrote: " + fname
+if metadata is None:
+    print "No metadata"
+else:
+    for k in metadata.keys():
+        if k == 'ostree.gpgsigs':
+            for i,sig in enumerate(metadata[k]):
+                fname = "sig.%d" % (i,)
+                with open(fname, 'w') as f:
+                    f.write(bytearray(sig))
+                print "Wrote: " + fname
