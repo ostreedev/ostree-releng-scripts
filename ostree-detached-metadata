@@ -49,7 +49,7 @@ elif arg.delete:
     for i in xrange(n_metadata):
         child = metadata.get_child_value(i)
         k = child.get_child_value(0).get_string()
-        v = child.get_child_value(1)
+        v = child.get_child_value(1).get_variant()
         if k == arg.key:
             continue
         new_metadata[k] = v
@@ -61,7 +61,7 @@ elif (arg.set_string_file is not None or arg.set_uint64 is not None):
     for i in xrange(n_metadata):
         child = metadata.get_child_value(i)
         k = child.get_child_value(0).get_string()
-        v = child.get_child_value(1)
+        v = child.get_child_value(1).get_variant()
         new_metadata[k] = v
     if arg.set_string_file is not None:
         with open(arg.set_string_file) as f:
