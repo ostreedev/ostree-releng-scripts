@@ -33,10 +33,7 @@ r.open(None)
 if arg.ref != rev:
     print "%s => %s" % (arg.ref, rev)
 _,metadata = r.read_commit_detached_metadata(rev, None)
-if metadata is None:
-    metadata = new_metadata = {}
-else:
-    new_metadata = {}
+n_metadata = 0 if metadata is None else metadata.n_children()
 
 arg = parser.parse_args()
 
@@ -48,8 +45,8 @@ if arg.key is None:
         for k in keys:
             print k
 elif arg.delete:
-    n = metadata.n_children()
-    for i in xrange(n):
+    new_metadata = {}
+    for i in xrange(n_metadata):
         child = metadata.get_child_value(i)
         k = child.get_child_value(0).get_string()
         v = child.get_child_value(1)
@@ -60,8 +57,8 @@ elif arg.delete:
     r.write_commit_detached_metadata(rev, new_metadatav, None)
     print "Deleted key: %s" % (arg.key, )
 elif (arg.set_string_file is not None or arg.set_uint64 is not None):
-    n = metadata.n_children()
-    for i in xrange(n):
+    new_metadata = {}
+    for i in xrange(n_metadata):
         child = metadata.get_child_value(i)
         k = child.get_child_value(0).get_string()
         v = child.get_child_value(1)
