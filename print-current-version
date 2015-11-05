@@ -1,0 +1,35 @@
+!/usr/bin/env python
+#
+# Print the value of `ostree.version` from the currently booted commit.
+#
+# Copyright 2015 Colin Walters <walters@verbum.org>
+# Licensed under the new-BSD license (http://www.opensource.org/licenses/bsd-license.php)
+
+from __future__ import print_function
+
+from gi.repository import GLib, Gio, OSTree
+import argparse
+
+def fatal(msg):
+    print >>sys.stderr, msg
+    sys.exit(1)
+
+parser = argparse.ArgumentParser(prog="print-current-version")
+arg = parser.parse_args()
+
+sysroot = OSTree.Sysroot.new_default()
+sysroot.load(None)
+
+_,repo = sysroot.get_repo(None)
+
+deployment = sysroot.get_booted_deployment()
+if deployment is None:
+    fatal("Not in a booted OSTree system!")
+
+commitid = deployment.get_csum()
+_,commit = repo.load_variant(OSTree.ObjectType.COMMIT, commitid)
+meta = commit.get_child_value(0)
+version = meta.get('version')
+if version is None:
+    fatal("Currently booted commit {0} does not have a version".format(commitid))
+print(version)
