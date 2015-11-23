@@ -32,4 +32,4 @@ meta = commit.get_child_value(0)
 version = meta.lookup_value('version', GLib.VariantType.new('s'))
 if version is None:
     fatal("Currently booted commit {0} does not have a version".format(commitid))
-print(version)
+print(version.get_string())
