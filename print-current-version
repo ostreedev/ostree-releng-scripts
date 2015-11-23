@@ -1,4 +1,4 @@
-!/usr/bin/env python
+#!/usr/bin/env python
 #
 # Print the value of `ostree.version` from the currently booted commit.
 #
@@ -29,7 +29,7 @@ if deployment is None:
 commitid = deployment.get_csum()
 _,commit = repo.load_variant(OSTree.ObjectType.COMMIT, commitid)
 meta = commit.get_child_value(0)
-version = meta.get('version')
+version = meta.lookup_value('version', GLib.VariantType.new('s'))
 if version is None:
     fatal("Currently booted commit {0} does not have a version".format(commitid))
 print(version)
