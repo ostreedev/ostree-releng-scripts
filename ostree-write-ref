@@ -1,0 +1,64 @@
+#!/usr/bin/env python
+#
+# Directly set a given ref to a commit, erroring if it doesn't
+# exist and --create is not specified.  You might use this
+# to implement something like immutable tags.
+#
+# Copyright 2016 Colin Walters <walters@verbum.org>
+#
+#  This program is free software; you can redistribute it and/or
+#  modify it under the terms of the GNU Lesser General Public
+#  License as published by the Free Software Foundation; either
+#  version 2 of the License, or (at your option) any later version.
+# 
+#  This library is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+#  Lesser General Public License for more details.
+# 
+#  You should have received a copy of the GNU Lesser General Public
+#  License along with this library. If not, see <http://www.gnu.org/licenses/>.
+
+from gi.repository import GLib, Gio, OSTree
+import argparse
+import sys
+
+staging_key = 'redhat.staging'
+
+def fatal(msg):
+    print >>sys.stderr, msg
+    sys.exit(1)
+
+parser = argparse.ArgumentParser(prog="ostree-edit-detached")
+parser.add_argument("--repo", help="Repo path",
+                    action='store', required=True)
+parser.add_argument("--create", help="Branch",
+                    action='store_true')
+parser.add_argument("--ref", help="Branch",
+                    action='store', required=True)
+parser.add_argument("--commit", help="commit",
+                    action='store', required=True)
+
+args = parser.parse_args()
+
+r = OSTree.Repo.new(Gio.File.new_for_path(args.repo))
+r.open(None)
+
+[_, current] = r.resolve_rev(args.ref, True)
+if current is None:
+    print("Ref {} does not currently exist".format(args.ref))
+    if not args.create:
+        print("--create not specified, exiting")
+        sys.exit(1)
+else:
+    print("Previously, {} = {}".format(args.ref, current))
+    if args.create:
+        print("--create specified but ref already exists!")
+        sys.exit(1)
+
+[_,commit,commitstate] = r.load_commit(args.commit)
+if commitstate != 0:
+    print("Invalid commit state for {}: {}".format(args.commit, commitstate))
+
+r.set_ref_immediate(None, args.ref, args.commit)
+print("Set {} => {}".format(args.ref, args.commit))
