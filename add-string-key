@@ -1,0 +1,64 @@
+#!/usr/bin/env python
+
+import sys
+from pprint import pprint as pp
+from gi.repository import GLib, Gio, OSTree
+import argparse
+
+parser = argparse.ArgumentParser(prog="ostree-add-key-string")
+parser.add_argument("--repo", help="Repo path",
+                    action='store', required=True)
+parser.add_argument("--ref", help="Branch or commit",
+                    action='store', required=True)
+parser.add_argument("--key", help="Key name",
+                    action='store', required=True)
+parser.add_argument("--string", help="String value of the key",
+                    action='store', required=True)
+
+arg = parser.parse_args()
+(repo, ref, key, string) = (arg.repo, arg.ref, arg.key, arg.string)
+
+r = OSTree.Repo.new(Gio.File.new_for_path(repo))
+r.open(None)
+
+[_,rev] = r.resolve_rev(ref, False)
+
+_,metadata = r.read_commit_detached_metadata(rev, None)
+def pp_metadata(metadata):
+    print "Metadata:"
+    n = metadata.n_children()
+    for i in xrange(n):
+        child = metadata.get_child_value(i)
+        print "%s" % (child.print_(True), )
+
+pp_metadata(metadata)
+
+new_metadata = None
+key_found = False
+
+if metadata:
+    n = metadata.n_children()
+    meta = {}
+    for i in xrange(n):
+        child = metadata.get_child_value(i)
+        k = child.get_child_value(0).get_string()
+        v = child.get_child_value(1).get_variant()
+        if k == key:
+            key_found = True
+            break
+        meta[k] = v
+        print "%s = %r" % (k, v)
+    if key_found:
+        print "key (%s) found for ostree: %s, ref: %s, exiting" % (key, repo, ref)
+        sys.exit(1)
+    meta[key] = GLib.Variant('s', string)
+    new_metadata = GLib.Variant('a{sv}', meta)
+else:
+    new_metadata = GLib.Variant('a{sv}', {key: GLib.Variant('s', string)})
+
+print "Adding key to ostree: %s, ref: %s" % (repo, ref)
+r.write_commit_detached_metadata(rev, new_metadata, None)
+
+[_,rev] = r.resolve_rev(ref, False)
+_,metadata = r.read_commit_detached_metadata(rev, None)
+pp_metadata(metadata)
