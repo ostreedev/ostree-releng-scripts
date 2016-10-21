@@ -4,6 +4,10 @@
 # avoids a few race conditions and issues that could otherwise
 # occur if one simply does the whole repository in a single run.
 #
+# Known issues:
+#   - Ignores the fact that detached metadata (e.g. GPG signatures)
+#     can be updated asynchronously.
+#
 # Copyright 2016 Colin Walters <walters@verbum.org>
 # Licensed under the new-BSD license (http://www.opensource.org/licenses/bsd-license.php)
 
