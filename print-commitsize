@@ -5,7 +5,7 @@
 # Copyright 2015 Colin Walters <walters@verbum.org>
 # Licensed under the new-BSD license (http://www.opensource.org/licenses/bsd-license.php)
 
-import sys
+import sys,os
 from gi.repository import GLib, Gio, OSTree
 
 repopath = sys.argv[1]
@@ -42,3 +42,4 @@ for v in sorted(buckets.keys()):
     [n,s] = buckets[v]
     print "%s => %s (%s MB)" % (v, n, s/(1000*1000))
 print "Total: {0} MB".format(total / (1000*1000))
+os._exit(0)
