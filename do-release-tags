@@ -49,7 +49,7 @@ for (name,newcommit) in releasedata['releases'].iteritems():
     ref = baseref + name
     [_, current] = r.resolve_rev(ref, True)
     if current is None:
-        if args.create_missing_refs:
+        if args.autocreate:
             print("Creating new ref {}.".format(ref))
             newparent = None
         else:
