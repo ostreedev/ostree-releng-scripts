@@ -5,6 +5,8 @@
 # Copyright 2015 Colin Walters <walters@verbum.org>
 # Licensed under the new-BSD license (http://www.opensource.org/licenses/bsd-license.php)
 
+import gi
+gi.require_version('OSTree', '1.0')
 import sys
 from gi.repository import GLib, Gio, OSTree
 
