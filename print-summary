@@ -1,0 +1,43 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+#
+# Print a textual representation of the summary file
+#
+# Copyright 2015 Colin Walters <walters@verbum.org>
+# Licensed under the new-BSD license (http://www.opensource.org/licenses/bsd-license.php)
+
+from __future__ import print_function
+
+import gi
+gi.require_version('OSTree', '1.0')
+from gi.repository import GLib, Gio, OSTree
+import argparse, os, sys
+
+def fatal(msg):
+    print >>sys.stderr, msg
+    sys.exit(1)
+
+parser = argparse.ArgumentParser(prog="print-summary")
+parser.add_argument("path", help="Summary path as file",
+                    action='store')
+args = parser.parse_args()
+
+with open(args.path) as f:
+    bytedata = GLib.Bytes.new(f.read())
+typestr = GLib.VariantType.new('(a(s(taya{sv}))a{sv})')
+d = GLib.Variant.new_from_bytes(typestr, bytedata, False)
+
+refs, other = d
+
+for refname, refdata in refs:
+    size=refdata[0]
+    csumarray=refdata[1]
+    if len(csumarray) != 32:
+        print("warning: invalid csum for ref {}", refname)
+        continue
+    csum = ''.join(['%x' % v for v in csumarray])
+    print("{} → {} (size={})".format(refname, csum, size))
+
+deltas = other.get('ostree.static-deltas', {})
+for (deltaname, csum) in deltas.iteritems():
+    print("delta: {}".format(deltaname))
