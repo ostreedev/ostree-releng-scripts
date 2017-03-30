@@ -1,0 +1,45 @@
+#!/usr/bin/env python
+#
+# This script calls out to a Red Hat internal
+# program called `rpm-sign`, and uses it to sign
+# a given OSTree commit.
+#
+# Copyright 2017 Colin Walters <walters@verbum.org>
+# Licensed under the new-BSD license (http://www.opensource.org/licenses/bsd-license.php)
+
+from __future__ import print_function
+
+import os, sys, argparse, gi, tempfile, subprocess
+gi.require_version('OSTree', '1.0')
+from gi.repository import GLib, Gio, OSTree
+
+def fatal(msg):
+    print >>sys.stderr, msg
+    sys.exit(1)
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--repo", help="Repo",
+                    action='store', required=True)
+parser.add_argument("--key", help="Key",
+                    action='store', required=True)
+parser.add_argument("--rev", help="OSTree commit ID",
+                    action='store', required=True)
+
+args = parser.parse_args()
+
+r = OSTree.Repo.new(Gio.File.new_for_path(args.repo))
+r.open(None)
+[_,rev] = r.resolve_rev(args.rev, False)
+[_,v] = r.load_variant(OSTree.ObjectType.COMMIT, rev)
+commit_bytes = v.get_data_as_bytes()
+
+with tempfile.NamedTemporaryFile() as commitfd:
+    commitfd.write(commit_bytes.get_data())
+    commitfd.flush()
+    with tempfile.NamedTemporaryFile() as sigfd:
+        subprocess.check_call(['rpm-sign', '--key', args.key, '--detachsign', commitfd.name,
+                               '--output', sigfd.name])
+        with open(sigfd.name) as sigfd_in:
+            sigdata = GLib.Bytes.new(sigfd_in.read())
+            r.append_gpg_signature(rev, sigdata, None)
+            print("Successfully signed OSTree commit={} with key={}".format(rev, args.key))
