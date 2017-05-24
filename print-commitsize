@@ -19,7 +19,6 @@ r.open(None)
 [_,rev] = r.resolve_rev(ref, False)
 
 print "%s => %s" % (ref, rev)
-reachable = OSTree.Repo.traverse_new_reachable()
 [_,reachable] = r.traverse_commit(rev, 0, None)
 total = 0
 n_meta = 0
