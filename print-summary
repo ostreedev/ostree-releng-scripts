@@ -11,7 +11,7 @@ from __future__ import print_function
 import gi
 gi.require_version('OSTree', '1.0')
 from gi.repository import GLib, Gio, OSTree
-import argparse, os, sys
+import argparse, os, sys, requests
 
 def fatal(msg):
     print >>sys.stderr, msg
@@ -22,8 +22,16 @@ parser.add_argument("path", help="Summary path as file",
                     action='store')
 args = parser.parse_args()
 
-with open(args.path) as f:
-    bytedata = GLib.Bytes.new(f.read())
+if args.path.startswith("http://") or args.path.startswith("https://"):
+    r = requests.get(args.path)
+    if r.status_code != requests.codes.ok:
+        print(r.headers)
+        print(r.text)
+        fatal("Couldn't fetch summary file")
+    bytedata = GLib.Bytes.new(r.content)
+else:
+    with open(args.path) as f:
+        bytedata = GLib.Bytes.new(f.read())
 typestr = GLib.VariantType.new('(a(s(taya{sv}))a{sv})')
 d = GLib.Variant.new_from_bytes(typestr, bytedata, False)
 
