@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+#
+# Convert a source skopeo ref into an ostree commit suitable
+# for booting on a host system and consumed via rpm-ostree.
+#
+# Copyright 2017 Colin Walters <walters@verbum.org>
+#
+#  This program is free software; you can redistribute it and/or
+#  modify it under the terms of the GNU Lesser General Public
+#  License as published by the Free Software Foundation; either
+#  version 2 of the License, or (at your option) any later version.
+#
+#  This library is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+#  Lesser General Public License for more details.
+#
+#  You should have received a copy of the GNU Lesser General Public
+#  License along with this library. If not, see <http://www.gnu.org/licenses/>.
+
+import gi
+gi.require_version('OSTree', '1.0')
+from gi.repository import GLib, Gio, OSTree
+import argparse, os, sys, hashlib, tempfile, subprocess, gzip
+import json, collections
+from collections import namedtuple
+
+# See also flatpak_arch_to_oci_arch
+ostree_arch_to_oci = {
+    "x86_64": "amd64",
+    "aarch64": "arm64",
+    "i386": "386",
+}
+
+def _drop_sha256_prefix(img):
+    if img.startswith("sha256:"):
+        img = img.replace("sha256:", "", 1)
+    return img
+
+def _parse_imagename(imagename):
+    sep = imagename.find("/")
+    reg, image = imagename[:sep], imagename[sep + 1:]
+    if '.' not in reg:
+        # if the registry doesn't look like a domain, consider it as the
+        # image prefix
+        reg = ""
+        image = imagename
+    sep = image.find(":")
+    if sep > 0:
+        return reg, image[:sep], image[sep + 1:]
+    else:
+        return reg, image, "latest"
+
+def _encode_to_ostree_ref(name):
+    def convert(x):
+        return (x if str.isalnum(str(x)) or x in '.-' else "_%02X" % ord(x))
+
+    if name.startswith("oci:"):
+        name = name[len("oci:"):]
+    registry, image, tag = _parse_imagename(name)
+    if registry:
+        fullname = "%s/%s:%s" % (registry, image, tag)
+    else:
+        fullname = "%s:%s" % (image, tag)
+
+    ret = "".join([convert(i) for i in fullname])
+    return 'ociimage/'+ret
+
+def _checkout_layer(repo, rootfs_fd, rootfs, rev, devino=None):
+    options = OSTree.RepoCheckoutAtOptions() # pylint: disable=no-member
+    options.overwrite_mode = OSTree.RepoCheckoutOverwriteMode.UNION_FILES
+    options.process_whiteouts = True
+    options.no_copy_fallback = True
+    if devino:
+        options.set_devino(devino)
+    if repo.get_mode() == OSTree.RepoMode.BARE_USER:
+        options.mode = OSTree.RepoCheckoutMode.USER
+    repo.checkout_at(options, rootfs_fd, rootfs, rev)
+
+def get_layers_from_manifest(manifest):
+    if isinstance(manifest, str):
+        manifest = json.loads(manifest)
+
+    fs_layers = manifest.get("fsLayers")
+    if fs_layers:
+        layers = list(i["blobSum"] for i in fs_layers)
+        layers.reverse()
+    elif "layers" in manifest:
+        layers = [x['digest'] for x in manifest.get("layers")]
+    else:
+        layers = manifest.get("Layers")
+    return layers
+
+def fatal(msg):
+    print >>sys.stderr, msg
+    sys.exit(1)
+
+def run_sync_verbose(argv):
+    print("{}".format(subprocess.list2cmdline(argv)))
+    subprocess.check_call(argv)
+
+parser = argparse.ArgumentParser(prog="skopeo2tree")
+parser.add_argument("--repo", help="Repo path",
+                    action='store', required=True)
+parser.add_argument("source", help="Skopeo source",
+                    action='store')
+parser.add_argument("--keep-tmpdir-on-failure", help="Do not delete temporary checkout root on failure",
+                    action='store_true')
+parser.add_argument("--dest-image-name", help="Target skopeo image name",
+                    action='store')
+parser.add_argument("ref", help="Branch",
+                    action='store')
+
+args = parser.parse_args()
+
+repo = OSTree.Repo.new(Gio.File.new_for_path(args.repo))
+repo.open(None)
+
+if not args.dest_image_name:
+    args.dest_image_name = args.ref.replace('/', '-').replace('_', '-')
+
+run_sync_verbose(['skopeo', 'copy', args.source, 'ostree:{}@{}'.format(args.dest_image_name, os.path.join(os.getcwd(),args.repo))])
+
+skopeo_ref = _encode_to_ostree_ref(args.dest_image_name)
+skopeo_rev = repo.resolve_rev(skopeo_ref, False)[1]
+skopeo_commit = repo.load_commit(skopeo_rev)[1]
+skopeo_commit_metadata = skopeo_commit.get_child_value(0)
+
+print("Imported {} => {}: {}".format(args.source, skopeo_ref, skopeo_rev))
+
+repo_tmp = args.repo + '/tmp'
+if not args.keep_tmpdir_on_failure:
+    checkout_tmpd = tempfile.TemporaryDirectory(prefix='skopeo2tree-', dir=repo_tmp)
+    checkout_tmpd_path = checkout_tmpd.name
+else:
+    checkout_tmpd_path = tempfile.mkdtemp(prefix='skopeo2tree-', dir=repo_tmp)
+manifest = skopeo_commit_metadata['docker.manifest']
+layers = get_layers_from_manifest(manifest)
+
+rootfs_fd = os.open(checkout_tmpd_path, os.O_DIRECTORY)
+try:
+    devino = OSTree.RepoDevInoCache.new()
+    for layer in layers:
+        branch = "ociimage/{}".format(_drop_sha256_prefix(layer))
+        rev_layer = repo.resolve_rev(branch, False)[1]
+        _checkout_layer(repo, rootfs_fd, '.', rev_layer, devino=devino)
+        print("Checked out layer {}".format(branch))
+    # Do rpm-ostree postprocessing
+    run_sync_verbose(['rpm-ostree', 'compose', 'postprocess', checkout_tmpd_path])
+
+    # And commit
+    modifier = OSTree.RepoCommitModifier.new(OSTree.RepoCommitModifierFlags.SKIP_XATTRS, None)
+    modifier.set_devino_cache(devino)
+    # Do SELinux labeling
+    sepolicy = OSTree.SePolicy.new_at(rootfs_fd, None)
+    modifier.set_sepolicy(sepolicy)
+    repo.prepare_transaction()
+    mtree = OSTree.MutableTree.new()
+    repo.write_dfd_to_mtree(rootfs_fd, '.', mtree, modifier, None)
+    root_commit = repo.write_mtree(mtree, None)[1]
+    metabuilder = GLib.VariantDict.new(None)
+    metabuilder.insert_value('ostree.source-title', GLib.Variant('s',args.source))
+    metabuilder.insert_value('docker.manifest', GLib.Variant('s', manifest))
+    final_rev = repo.write_commit(None, '', '', metabuilder.end(), root_commit, None)[1]
+    repo.transaction_set_ref(None, args.ref, final_rev)
+    repo.commit_transaction(None)
+    print("Wrote {} → {}".format(args.ref, final_rev))
+finally:
+    os.close(rootfs_fd)

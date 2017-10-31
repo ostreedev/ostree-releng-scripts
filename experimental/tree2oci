@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+#
+# Convert an ostree ref into an OCI layout, suitable for
+# e.g. copying with skopeo to an OCI/Docker registry
+#
+# Copyright 2017 Colin Walters <walters@verbum.org>
+#
+#  This program is free software; you can redistribute it and/or
+#  modify it under the terms of the GNU Lesser General Public
+#  License as published by the Free Software Foundation; either
+#  version 2 of the License, or (at your option) any later version.
+#
+#  This library is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+#  Lesser General Public License for more details.
+#
+#  You should have received a copy of the GNU Lesser General Public
+#  License along with this library. If not, see <http://www.gnu.org/licenses/>.
+
+import gi
+gi.require_version('OSTree', '1.0')
+from gi.repository import GLib, Gio, OSTree
+import argparse, os, sys, hashlib, tempfile, subprocess, gzip
+import json, collections
+from collections import namedtuple
+
+# See also flatpak_arch_to_oci_arch
+ostree_arch_to_oci = {
+    "x86_64": "amd64",
+    "aarch64": "arm64",
+    "i386": "386",
+}
+
+def fatal(msg):
+    print >>sys.stderr, msg
+    sys.exit(1)
+
+parser = argparse.ArgumentParser(prog="tree2oci")
+parser.add_argument("--repo", help="Repo path",
+                    action='store', required=True)
+parser.add_argument("--gzip-complevel", help="gzip compression level",
+                    type=int, action='store', default=3)
+parser.add_argument("--config", help="Config JSON",
+                    action='store')
+parser.add_argument("--destdir", help="Path to OCI layout directory",
+                    action='store')
+parser.add_argument("ref", help="Branch",
+                    action='store')
+parser.add_argument("image-tag", help="image:tag",
+                    action='store')
+
+args = parser.parse_args()
+
+(image_name, tag) = getattr(args, 'image-tag').split(':', 1)
+if args.destdir is None:
+    args.destdir = image_name
+
+r = OSTree.Repo.new(Gio.File.new_for_path(args.repo))
+r.open(None)
+
+[_, current_rev] = r.resolve_rev(args.ref, False)
+print("Resolved {} = {}".format(args.ref, current_rev))
+[_, ostree_commit, _] = r.load_commit(current_rev)
+
+oci_arch = None
+for arch in ostree_arch_to_oci:
+    if arch in args.ref:
+        oci_arch = ostree_arch_to_oci[arch]
+        print("Found ostree arch {}, using OCI arch: {}".format(arch, oci_arch))
+        break
+if oci_arch is None:
+    oci_arch = ostree_arch_to_oci['x86_64']
+    print("No ostree arch found, defaulting to x86_64, i.e. OCI arch: {}".format(oci_arch))
+
+destdir=args.destdir
+os.mkdir(destdir)
+
+blobdir=destdir+'/blobs/sha256'
+os.makedirs(blobdir)
+
+with open(destdir + '/oci-layout', 'w') as f:
+    f.write('{"imageLayoutVersion": "1.0.0"}')
+
+Blob = collections.namedtuple('Blob', ['sha256', 'sha256_uncompressed', 'size'])
+# This should be "canonical JSON" apparently,
+# https://github.com/opencontainers/image-spec/blob/master/considerations.md#extensibility
+# http://wiki.laptop.org/go/Canonical_JSON
+def write_json_blob(data, blobdir, destname=None):
+    serialized = json.dumps(data).encode('UTF-8')
+    h = hashlib.sha256()
+    h.update(serialized)
+    d = h.hexdigest()
+    if destname is None:
+        destname = d
+    with open(blobdir + '/' + destname, "wb") as f:
+        f.write(serialized)
+    return Blob(sha256=d, sha256_uncompressed=d, size=len(serialized))
+
+def export_ostree_ref_to_blobdir(ref, blobdir):
+    (layerfd, layer_tmppath) = tempfile.mkstemp(prefix="ostree-export",
+                                                dir=blobdir)
+    layerf = os.fdopen(layerfd, "r+b")
+    compressed_hash = hashlib.sha256()
+    try:
+        export_proc = subprocess.Popen(['ostree', '--repo=' + args.repo, 'export', ref],
+                                       stdout=subprocess.PIPE)
+        with gzip.GzipFile(fileobj=layerf, mode="w",
+                           compresslevel=args.gzip_complevel) as layerf_gzip:
+            uncompressed_hash = hashlib.sha256()
+            while True:
+                buf = export_proc.stdout.read(8192)
+                if len(buf) == 0:
+                    break
+                uncompressed_hash.update(buf)
+                # TODO calculate compressed hash here too
+                layerf_gzip.write(buf)
+        layerf.seek(0, os.SEEK_SET)
+        while True:
+            buf = layerf.read(8192)
+            if len(buf) == 0:
+                break
+            compressed_hash.update(buf)
+    except:
+        os.unlink(layer_tmppath)
+        raise
+
+    os.chmod(layerfd, 0o644)
+    baselayer_size = os.fstat(layerfd).st_size
+    baselayer_sha256 = compressed_hash.hexdigest()
+    blobpath = blobdir+'/'+baselayer_sha256
+    os.rename(layer_tmppath, blobpath)
+    return Blob(sha256=baselayer_sha256, sha256_uncompressed=uncompressed_hash.hexdigest(), size=baselayer_size)
+
+baselayer_blob = export_ostree_ref_to_blobdir(args.ref, blobdir)
+print("Generated base layer blob {}".format(baselayer_blob))
+
+commit_ts = OSTree.commit_get_timestamp(ostree_commit)
+commit_datetime = GLib.DateTime.new_from_unix_utc(commit_ts)
+commit_datetime_iso8601 = commit_datetime.format("%FT%H:%M:%SZ")
+config_data = {
+    'created': commit_datetime_iso8601,
+    'architecture': oci_arch,
+    'os': 'linux',
+    'rootfs': {
+        'type': 'layers',
+        'diff_ids': ['sha256:' + baselayer_blob.sha256_uncompressed],
+    },
+    'history': [
+        { 'created': commit_datetime_iso8601,
+          'commit': 'created by ostree-releng-scripts/tree2oci',
+        },
+    ],
+}
+
+user_config_data = {}
+if args.config is not None:
+    with open(args.config) as f:
+        user_config_data = json.load(f)
+config_data['config'] = user_config_data
+config_labels = config_data['config'].setdefault('Labels', {})
+config_labels['name'] = image_name
+
+config_blob = write_json_blob(config_data, blobdir)
+
+manifest_data = {
+    'schemaVersion': 2,
+    'config': {
+        'mediaType': 'application/vnd.oci.image.config.v1+json',
+        'size': config_blob.size,
+        'digest': 'sha256:' + config_blob.sha256,
+    },
+    'layers': [
+        { 'mediaType': 'application/vnd.oci.image.layer.v1.tar+gzip',
+          'size': baselayer_blob.size,
+          'digest': 'sha256:' + baselayer_blob.sha256,
+        }
+    ],
+}
+
+manifest_blob = write_json_blob(manifest_data, blobdir)
+
+index_data = {
+    'schemaVersion': 2,
+    'manifests': [
+        { 'mediaType': 'application/vnd.oci.image.manifest.v1+json',
+          'digest': 'sha256:' + manifest_blob.sha256,
+          'size': manifest_blob.size,
+          'annotations': {
+              "org.opencontainers.image.ref.name": tag,
+          },
+          'platform': {
+              'architecture': oci_arch,
+              'os': 'linux'
+          }
+        }
+    ],
+}
+
+index_blob = write_json_blob(index_data, destdir, destname='index.json')
+oci_layout_blob = write_json_blob({'imageLayoutVersion': '1.0.0'}, destdir, destname='oci-layout')
+print("Wrote: oci:{}:{}".format(destdir, tag))
