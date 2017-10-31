@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+#
+# Print statistics on the objects for a given ref/commit in a filesystem tree, from
+# e.g. `rpm-ostree compose install`
+#
+# Copyright 2015 Colin Walters <walters@verbum.org>
+# Licensed under the new-BSD license (http://www.opensource.org/licenses/bsd-license.php)
+
+import sys,os,argparse,stat,collections,re
+import gi
+gi.require_version('OSTree', '1.0')
+from gi.repository import GLib, Gio, OSTree
+
+def openat(path, flags):
+    return os.open(path, flags, dir_fd=dir_fd)
+
+parser = argparse.ArgumentParser(prog=sys.argv[0])
+parser.add_argument("path", help="filesystem tree path",
+                    action='store')
+args = parser.parse_args()
+
+passwd_db = {}
+group_db = {}
+if os.path.isfile(args.path + '/usr/lib/passwd'):
+    with open(args.path + '/usr/lib/passwd') as f:
+        for line in f:
+            if line == '': continue
+            (name, _, uid, gid, _) = line.split(':', 4)
+            passwd_db[int(uid)] = (True, name, int(gid))
+with open(args.path + '/usr/etc/passwd') as f:
+    for line in f:
+        if line == '': continue
+        (name, _, uid, gid, _) = line.split(':', 4)
+        passwd_db[int(uid)] = (False, name, int(gid))
+
+if os.path.isfile(args.path + '/usr/lib/group'):
+    with open(args.path + '/usr/lib/group') as f:
+        for line in f:
+            if line == '': continue
+            (name, _, gid, _) = line.split(':', 3)
+            group_db[int(gid)] = (True, name)
+with open(args.path + '/usr/etc/group') as f:
+    for line in f:
+        if line == '': continue
+        (name, _, gid, _) = line.split(':', 3)
+        group_db[int(gid)] = (False, name)
+
+usr_nonroot = set()
+usretc_nonroot = set()
+var_nonroot = set()
+run_nonroot = set()
+other_nonroot = set()
+
+FileMeta = collections.namedtuple('FileMeta', ['path', 'user', 'group', 'mode'])
+
+def add_nonroot_path(fmeta):
+    if fmeta.path.startswith('/usr/etc/'):
+        usretc_nonroot.add(fmeta)
+    elif fmeta.path.startswith('/usr/'):
+        usr_nonroot.add(fmeta)
+    elif fmeta.path.startswith('/var/'):
+        var_nonroot.add(fmeta)
+    elif fmeta.path.startswith('/run/'):
+        run_nonroot.add(fmeta)
+    else:
+        other_nonroot.add(fmeta)
+
+def analyze_path(dfd, name, fpath):
+    stbuf = os.lstat(name, dir_fd=dfd)
+    uid_or_gid_nonzero = False
+    owner = 'root'
+    group = 'root'
+    if stbuf.st_uid != 0:
+        entry = passwd_db.get(stbuf.st_uid)
+        if entry is None:
+            print("Unknown uid {} for {}".format(stbuf.st_uid, fpath))
+        else:
+            owner = entry[1]
+            uid_or_gid_nonzero = True
+    if stbuf.st_gid != 0:
+        entry = group_db.get(stbuf.st_gid)
+        if entry is None:
+            print("Unknown gid {} for {}".format(stbuf.st_gid, fpath))
+        else:
+            group = entry[1]
+            uid_or_gid_nonzero = True
+    if not uid_or_gid_nonzero:
+        return
+    if fpath.startswith('./'):
+        fpath = fpath[1:]
+    add_nonroot_path(FileMeta(path=fpath, user=owner, group=group, mode=stbuf.st_mode))
+
+rootfd = os.open(args.path, os.O_DIRECTORY)
+for (dpath, dirnames, fnames, dfd) in os.fwalk(dir_fd=rootfd):
+    for fname in fnames:
+        analyze_path(dfd, fname, dpath + '/' + fname)
+    for dname in dirnames:
+        analyze_path(dfd, dname, dpath + '/' + dname)
+
+def analyze_tmpfiles_file(dfd, path):
+    ws_re = re.compile(r'\s+')
+    with open(os.open(path, os.O_RDONLY, dir_fd=dfd)) as f:
+        for line in f:
+            if not line.startswith('d '):
+                continue
+            parts = ws_re.split(line)
+            (path, mode, user, group) = parts[1:5]
+            if user in ('0', 'root', '-') and group in ('0', 'root', '-'):
+                continue
+            add_nonroot_path(FileMeta(path=path, user=user, group=group, mode=stat.S_IFDIR | int(mode)))
+
+tmpfiles_dfd = os.open(path="usr/lib/tmpfiles.d", flags=os.O_DIRECTORY, dir_fd=rootfd)
+for entry in os.listdir(tmpfiles_dfd):
+    if not entry.endswith('.conf'):
+        continue
+    analyze_tmpfiles_file(tmpfiles_dfd, entry)
+
+def dumpset(title, s):
+    print("{}: {}".format(title, len(s)))
+
+    for fmeta in sorted(s):
+        if stat.S_ISREG(fmeta.mode):
+            typestr = '-'
+            if fmeta.mode & stat.S_ISUID:
+                typestr += '+s'
+            else:
+                typestr += '  '
+
+            if fmeta.mode & stat.S_ISGID:
+                typestr += '+g'
+            else:
+                typestr += '  '
+        elif stat.S_ISLNK(fmeta.mode):
+            typestr = 'l    '
+        elif stat.S_ISDIR(fmeta.mode):
+            typestr = 'd    '
+        else:
+            typestr = '?'
+        print("  {} {}:{}: {}".format(typestr, fmeta.user, fmeta.group, fmeta.path))
+    print("")
+
+dumpset("/usr/etc nonroot", usretc_nonroot)
+dumpset("/usr nonroot", usr_nonroot)
+dumpset("/var nonroot", var_nonroot)
+dumpset("/run nonroot", run_nonroot)
+dumpset("Other nonroot", other_nonroot)
