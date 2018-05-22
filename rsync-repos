@@ -28,6 +28,10 @@ parser.add_argument("--rsync-opt", help="Additional (single) rsync option",
                     action='append', default=[])
 
 args = parser.parse_args()
+if not args.src.endswith('/'):
+    args.src = args.src + '/'
+if not args.dest.endswith('/'):
+    args.dest = args.dest + '/'
 
 OBJECTS_AND_DELTAS = ['/objects', '/objects/**', '/deltas', '/deltas/**']
 # We rsync in reverse data dependence order - the summary and refs
