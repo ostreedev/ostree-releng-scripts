@@ -33,24 +33,27 @@ if not args.src.endswith('/'):
 if not args.dest.endswith('/'):
     args.dest = args.dest + '/'
 
-OBJECTS_AND_DELTAS = ['/objects', '/objects/**', '/deltas', '/deltas/**']
-# We rsync in reverse data dependence order - the summary and refs
-# point to objects + deltas.  Our first pass over the objects doesn't
-# perform any deletions, as that would create race conditions.  We
-# do handle deletions for refs and summary.
-# Finally, we handle any deletions for objects and deltas.
-RSYNC_ORDERING = [(OBJECTS_AND_DELTAS, ['--ignore-existing']),
-                  (['/refs', '/refs/**', '/summary', '/summary.sig'], ['--delete', '--ignore-missing-args']),
-                  (OBJECTS_AND_DELTAS, ['--ignore-existing', '--delete'])]
+rsync_opts = []
+if args.rsync_opts is not None:
+    rsync_opts.extend(shlex.split(args.rsync_opts))
+rsync_opts.extend(args.rsync_opt)
 
-for (paths, opts) in RSYNC_ORDERING:
+def rsync(paths, opts, ignore_missing_args=False):
     argv = ['rsync', '-rlpt']
     for path in paths:
         argv.append('--include=' + path)
     argv.extend(['--exclude=*', args.src, args.dest])
-    argv.extend(opts)
-    if args.rsync_opts is not None:
-        argv.extend(shlex.split(args.rsync_opts))
-    argv.extend(args.rsync_opt)
+    argv.extend(rsync_opts)
     print("Executing: {}".format(subprocess.list2cmdline(argv)))
     subprocess.check_call(argv)
+
+OBJECTS_AND_DELTAS = ['/objects', '/objects/**', '/deltas', '/deltas/**']
+REFS_AND_SUMMARY = ['/refs', '/refs/**', '/summary*']
+# We rsync in reverse data dependence order - the summary and refs
+# point to objects + deltas.  Our first pass over the objects doesn't
+# perform any deletions, as that would create race conditions.  We
+# do handle deletions for refs and summary.
+rsync(OBJECTS_AND_DELTAS, ['--ignore-existing'])
+rsync(REFS_AND_SUMMARY, ['--delete'])
+# Finally, we handle any deletions for objects and deltas.
+rsync(OBJECTS_AND_DELTAS, ['--ignore-existing', '--delete'])
