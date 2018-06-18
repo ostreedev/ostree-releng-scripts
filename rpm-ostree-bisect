@@ -1,0 +1,405 @@
+#!/usr/bin/python3
+#
+# Copyright 2018 Dusty Mabe <dusty@dustymabe.com>
+#
+#  This program is free software; you can redistribute it and/or
+#  modify it under the terms of the GNU Lesser General Public
+#  License as published by the Free Software Foundation; either
+#  version 2 of the License, or (at your option) any later version.
+# 
+#  This library is distributed in the hope that it will be useful,
+#  but WITHOUT ANY WARRANTY; without even the implied warranty of
+#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+#  Lesser General Public License for more details.
+# 
+#  You should have received a copy of the GNU Lesser General Public
+#  License along with this library. If not, see <http://www.gnu.org/licenses/>.
+#
+#
+# This program will bisect your RPM-OSTree system. Some high level
+# representation of what it does is:
+#
+#    grab info on every commit in history 
+#    A -> B -> C -> D -> E -> F -> G
+#
+#    user provided good/bad commits
+#    - good (default to first in history: A)
+#    - bad (default to current commit: G) 
+#    
+#    run test script
+#    returns 0 for pass and 1 for failure
+#
+#    known good is A, known bad is G
+#    
+#    start bisect:
+#    deploy D, test --> bad
+#    mark D, E, F bad
+#
+#    deploy B, test --> good
+#    mark B good
+#
+#    deploy C, test --> bad
+#
+#    Failure introduced in B -> C
+#
+# At a minimum place this script in /usr/local/bin/rpm-ostree-bisect 
+# and create a test script at /usr/local/bin/test.sh. Then:
+#
+# $ rpm-ostree-bisect --testscript /usr/local/bin/test.sh && reboot
+# ORR
+# $ python2 /usr/local/bin/rpm-ostree-bisect --testscript /usr/local/bin/test.sh && reboot
+#
+# Later check systemctl status rpm-ostree-bisect.service for result
+#
+ 
+# python2 compatibility
+from __future__ import print_function
+
+import argparse
+import json
+import os
+import os.path
+import subprocess
+import sys
+import tempfile
+from collections import OrderedDict
+
+import gi
+gi.require_version('OSTree', '1.0')
+from gi.repository import GLib, Gio, OSTree
+
+DATA_FILE = '/var/lib/rpm-ostree-bisect.json'
+SYSTEMD_UNIT_FILE = '/etc/systemd/system/rpm-ostree-bisect.service'
+SYSTEMD_UNIT_NAME = 'rpm-ostree-bisect.service'
+SYSTEMD_UNIT_CONTENTS = """
+[Unit]
+Description=RPM-OSTree Bisect Testing
+After=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+#ExecStart=/usr/bin/sleep 20
+ExecStart=%s %s --resume
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+""" % (sys.executable, sys.argv[0])
+
+
+def fatal(msg):
+    print(msg, file=sys.stderr)
+    sys.exit(1)
+
+def log(msg):
+    print(msg)
+    sys.stdout.flush()
+
+""" 
+    Initialize commit info ordered dict. The array will be a list of 
+    commits in descending order. Each entry will be a dict with 
+    key of commitid and value = a dict of version, heuristic
+    (TESTED, GIVEN, ASSUMED), and status (GOOD/BAD/UNKNOWN)
+
+    commits = {
+        'abcdef' => { 'version': '28.20180302.0' ,
+                      'heuristic', 'GIVEN',
+                      'status': 'BAD',
+                    },
+        'bbcdef' => { 'version': '28.20180301.0' ,
+                      'heuristic', 'ASSUMED',
+                      'status': 'UNKNOWN',
+                    },
+        'cbcdef' => { 'version': '28.20180228.0' ,
+                      'heuristic', 'TESTED',
+                      'status': 'GOOD',
+                    },
+    }
+"""
+def initialize_commits_info(repo, bad, good):
+    # An ordered dictionary of commit info
+    info = OrderedDict()
+    # The first commit in our list will be the "BAD" commit
+    commitid = bad
+
+    # Iterate over all commits and add them to the dict
+    while commitid is not None:
+
+        # Grab commit object. If None then history has been
+        # trimmed from the remote and we can break
+        _, commit = repo.load_variant_if_exists(
+                        OSTree.ObjectType.COMMIT, commitid)
+        if commit is None:
+            break
+
+        # Grab version info from commit
+        meta = commit.get_child_value(0)
+        version = meta.lookup_value('version', GLib.VariantType.new('s'))
+        if version is None:
+            version = ''
+        else:
+            version = version.get_string()
+
+        # Grab timestamp info from commit
+        commit_ts = OSTree.commit_get_timestamp(commit)
+        commit_datetime = GLib.DateTime.new_from_unix_utc(commit_ts)
+        commit_datetime_iso8601 = commit_datetime.format("%FT%H:%M:%SZ")
+
+        # Update info dict
+        info.update({ commitid: {  'version': version,
+                                 'timestamp': commit_datetime_iso8601,
+                                 'heuristic': 'ASSUMED',
+                                    'status': 'UNKNOWN' }})
+        # Next iteration
+        commitid = OSTree.commit_get_parent(commit)
+
+    # Mark the bad commit bad
+    info[bad]['status'] = 'BAD'
+    info[bad]['heuristic'] = 'GIVEN'
+
+    # Mark the good commit good
+    if good:
+        info[good]['status'] = 'GOOD'
+        info[good]['heuristic'] = 'GIVEN'
+
+    return info
+
+"""
+    Grab all commit history from the remote (just
+    the metadata).
+"""
+def pull_commit_history(deployment, repo):
+
+    # Get repo, remote and refspec from the booted deployment
+    origin = deployment.get_origin()
+    refspec = origin.get_string('origin', 'refspec')
+    # with layered packages it has baserefspec
+    #refspec = origin.get_string('origin', 'baserefspec')
+    _, remote, ref = OSTree.parse_refspec(refspec)
+
+    # Build up options array for pull call
+    #   refs (as): Array of string refs
+    #   flags (i): An instance of OSTree.RepoPullFlags
+    #   depth (i): How far in the history to traverse; default is 0, -1 means infinite
+    # More info on Gvariant types:
+    #   https://lazka.github.io/pgi-docs/GLib-2.0/classes/VariantType.html#GLib.VariantType
+    flags = OSTree.RepoPullFlags(2) # COMMIT_ONLY = 2 Only pull commit metadata
+    depth = -1 # -1 means max depth
+    options = GLib.Variant('a{sv}', {
+        'refs': GLib.Variant('as', [ref]),
+        'flags': GLib.Variant('i', flags),
+        'depth': GLib.Variant('i', depth),
+    })
+
+    # Grab commit metadata history for ref from repo
+    progress = OSTree.AsyncProgress.new()
+    #progress2 = OSTree.AsyncProgress.new_and_connect(OSTree.Repo.pull_default_console_progress_changed(progress, None), None)
+    repo.pull_with_options(remote, options, progress, None) 
+
+def load_data(datafile):
+    with open(datafile, 'r') as f:
+        data = json.load(f, object_pairs_hook=OrderedDict)
+    commits_info = data['commits_info']
+    testscript = data['test_script']
+    return commits_info, testscript
+
+def write_data(datafile, commits_info, testscript):
+    data = { 'commits_info': commits_info,
+             'test_script': testscript }
+
+    dirname = os.path.dirname(datafile)
+    (_, tmpfile) = tempfile.mkstemp(
+                    dir=dirname,
+                    prefix="rpm-ostree-bisect")
+
+    with open(tmpfile, 'w') as f:
+        json.dump(data, f, indent=4)
+    os.rename(tmpfile, datafile)
+
+
+def verify_script(testscript):
+    # Verify test script exists and is executable
+    if not testscript:
+        fatal("Must provide a --testscript to run")
+    if not (os.path.isfile(testscript)
+         and os.access(testscript, os.X_OK)):
+        fatal("provided test script: %s is not an executable file"
+                % testscript)
+
+
+def bisect_start(args, deployment, repo):
+    badcommit  = args.badcommit
+    goodcommit = args.goodcommit
+    datafile   = args.datafile
+    testscript = args.testscript
+
+    # verify test script 
+    verify_script(testscript)
+
+    # Assume currently booted commit is bad if no
+    # bad commit was given
+    if badcommit is None:
+        badcommit = deployment.get_csum()
+
+    # pull commit history
+    pull_commit_history(deployment, repo)
+
+    # initialize data
+    commits_info = initialize_commits_info(repo, 
+                                           badcommit, 
+                                           goodcommit)
+
+    # Write data to file
+    write_data(datafile, commits_info, testscript)
+
+    # write/enable systemd unit
+    with open(SYSTEMD_UNIT_FILE, 'w') as f:
+        f.write(SYSTEMD_UNIT_CONTENTS)
+    cmd = ['/usr/bin/systemctl', 'daemon-reload']
+    subprocess.call(cmd)
+    cmd = ['/usr/bin/systemctl', 'enable', SYSTEMD_UNIT_NAME]
+    subprocess.call(cmd)
+    return 0
+
+
+def bisect_resume(args, deployment, repo):
+    badcommit  = args.badcommit
+    goodcommit = args.goodcommit
+    datafile   = args.datafile
+
+    # load data
+    commits_info, testscript = load_data(datafile)
+
+    # verify test script 
+    verify_script(testscript)
+
+    # run test
+    ec = subprocess.call(testscript, shell=True)
+    if ec == 0:
+        success = True
+    else:
+        success = False
+
+    # update and write data
+    commit = deployment.get_csum()
+    if success:
+        for c in reversed(commits_info.keys()):
+            commits_info[c]['status'] = 'GOOD' 
+            if c == commit:
+                commits_info[c]['heuristic'] = 'TESTED' 
+                break
+    else:
+        for c in commits_info.keys():
+            commits_info[c]['status'] = 'BAD' 
+            if c == commit:
+                commits_info[c]['heuristic'] = 'TESTED' 
+                break
+    write_data(datafile, commits_info, testscript)
+
+    # Find list of unknown status commits
+    unknowns = []
+    lastbad = None
+    firstgood = None
+    for commitid in commits_info.keys():
+        status = commits_info[commitid]['status'] 
+        if status == 'BAD':
+            lastbad = commitid
+        elif status == 'UNKNOWN':
+            unknowns.append(commitid)
+        elif status == 'GOOD':
+            firstgood = commitid
+            break
+
+    if len(unknowns) == 0:
+        # We're done!
+        cmd = ['/usr/bin/systemctl', 'disable', SYSTEMD_UNIT_NAME]
+        subprocess.call(cmd)
+
+        log("BISECT TEST RESULTS:")
+
+        if firstgood is None:
+            log("No good commits were found in the history!")
+            log("Is it possible the remote has trimmed history?")
+            return 0
+
+        # Do a sanity check to see if the good commit was actually tested.
+        if commits_info[firstgood]['heuristic'] == 'GIVEN':
+            log("WARNING: The good commit detected was the one given by the user.")
+            log("WARNING: Are you sure this commit is good?")
+
+        log("Last known good commit:\n  %s : %s : %s" %
+              (firstgood[0:7],
+               commits_info[firstgood]['version'],
+               commits_info[firstgood]['timestamp']))
+        log("First known bad commit:\n  %s : %s : %s" %
+              (lastbad[0:7],
+               commits_info[lastbad]['version'],
+               commits_info[lastbad]['timestamp']))
+        # print out some db info
+        pull_commit_history(deployment, repo)
+        cmd = ['/usr/bin/rpm-ostree', 'db', 'diff',
+               firstgood, lastbad]
+        subprocess.call(cmd)
+        return 0
+
+    # Bisect for new test commit id
+    newcommitid = unknowns[len(unknowns)//2]
+
+
+    # Deploy new commit for testing. Retry download if fails
+    log("Deploying new commit for testing\n\t%s : %s : %s" %
+          (newcommitid[0:7],
+           commits_info[newcommitid]['version'],
+           commits_info[newcommitid]['timestamp']))
+    cmd = ['/usr/bin/rpm-ostree', 'deploy', newcommitid]
+    log("Trying to run '%s'" % cmd)
+    tries = 30 # retry if download timesout
+    while tries > 0:
+        ec = subprocess.call(cmd)
+        if ec == 0:
+            break
+        tries = tries - 1
+
+    # If we deployed the new commit then we can reboot!
+    if tries > 0:
+        # Success, reboot now
+        cmd = ['/usr/sbin/shutdown', 'now', '-r']
+        subprocess.call(cmd)
+    else:
+        fatal("Failed to deploy new commit")
+
+def main():
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--bad", dest='badcommit',
+                        help="Known Bad Commit", action='store')
+    parser.add_argument("--good", dest='goodcommit',
+                        help="Known Good Commit", action='store')
+    parser.add_argument("--testscript", help="A test script to run",
+                        action='store')
+    parser.add_argument("--resume", help="Resume a running bisection",
+                        action='store_true')
+    parser.add_argument("--datafile", help="data file to use for state",
+                        action='store', default=DATA_FILE)
+    args = parser.parse_args()
+
+    # Get sysroot, deployment, repo
+    sysroot = OSTree.Sysroot.new_default()
+    sysroot.load(None)
+    deployment = sysroot.get_booted_deployment()
+    if deployment is None:
+        fatal("Not in a booted OSTree system!")
+    _, repo = sysroot.get_repo(None)
+
+    log("Using data file at: %s" % args.datafile)
+
+    if args.resume:
+        bisect_resume(args, deployment, repo)
+    else:
+        bisect_start(args, deployment, repo)
+
+
+if __name__ == '__main__':
+    main()
