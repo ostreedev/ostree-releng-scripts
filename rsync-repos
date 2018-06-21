@@ -28,6 +28,7 @@ parser.add_argument("--rsync-opt", help="Additional (single) rsync option",
                     action='append', default=[])
 
 args = parser.parse_args()
+
 if not args.src.endswith('/'):
     args.src = args.src + '/'
 if not args.dest.endswith('/'):
@@ -44,6 +45,7 @@ def rsync(paths, opts, ignore_missing_args=False):
         argv.append('--include=' + path)
     argv.extend(['--exclude=*', args.src, args.dest])
     argv.extend(rsync_opts)
+    argv.extend(opts)
     print("Executing: {}".format(subprocess.list2cmdline(argv)))
     subprocess.check_call(argv)
 
