@@ -97,6 +97,39 @@ def log(msg):
     print(msg)
     sys.stdout.flush()
 
+"""
+    Find out of the given commitid is a base commit (i.e. no
+    layered packages). We'll cue off of the `rpmostree.clientlayer`
+    metadata for this.
+"""
+def is_base_commit(repo, commitid):
+    # Grab commit object. If None then history has been
+    # trimmed from the remote and we can break
+    _, commit = repo.load_variant_if_exists(
+                    OSTree.ObjectType.COMMIT, commitid)
+    # Grab version info from commit
+    meta = commit.get_child_value(0)
+    clientlayer = meta.lookup_value('rpmostree.clientlayer', GLib.VariantType.new('b'))
+    if clientlayer:
+        return False
+    else:
+        return True
+
+
+"""
+    Find the base commit of the deployment for the system. This
+    only differs from what you would expect if the system has
+    layered packages.
+"""
+def get_deployed_base_commit(deployment, repo):
+    commitid = deployment.get_csum()
+    if not is_base_commit(repo, commitid):
+        _, commit = repo.load_variant_if_exists(
+                        OSTree.ObjectType.COMMIT, commitid)
+        commitid = OSTree.commit_get_parent(commit)
+    return commitid
+
+
 """ 
     Initialize commit info ordered dict. The array will be a list of 
     commits in descending order. Each entry will be a dict with 
@@ -166,6 +199,7 @@ def initialize_commits_info(repo, bad, good):
 
     return info
 
+
 """
     Grab all commit history from the remote (just
     the metadata).
@@ -173,10 +207,14 @@ def initialize_commits_info(repo, bad, good):
 def pull_commit_history(deployment, repo):
 
     # Get repo, remote and refspec from the booted deployment
+    # The refspec in the metadata is either `refspec` if there
+    # are no layered packages (i.e. the deployed commit is a base
+    # commit) or `baserefspec` if there are.
     origin = deployment.get_origin()
-    refspec = origin.get_string('origin', 'refspec')
-    # with layered packages it has baserefspec
-    #refspec = origin.get_string('origin', 'baserefspec')
+    if is_base_commit(repo, deployment.get_csum()):
+        refspec = origin.get_string('origin', 'refspec')
+    else:
+        refspec = origin.get_string('origin', 'baserefspec')
     _, remote, ref = OSTree.parse_refspec(refspec)
 
     # Build up options array for pull call
@@ -198,12 +236,14 @@ def pull_commit_history(deployment, repo):
     #progress2 = OSTree.AsyncProgress.new_and_connect(OSTree.Repo.pull_default_console_progress_changed(progress, None), None)
     repo.pull_with_options(remote, options, progress, None) 
 
+
 def load_data(datafile):
     with open(datafile, 'r') as f:
         data = json.load(f, object_pairs_hook=OrderedDict)
     commits_info = data['commits_info']
     testscript = data['test_script']
     return commits_info, testscript
+
 
 def write_data(datafile, commits_info, testscript):
     data = { 'commits_info': commits_info,
@@ -241,7 +281,7 @@ def bisect_start(args, deployment, repo):
     # Assume currently booted commit is bad if no
     # bad commit was given
     if badcommit is None:
-        badcommit = deployment.get_csum()
+        badcommit = get_deployed_base_commit(deployment, repo)
 
     # pull commit history
     pull_commit_history(deployment, repo)
@@ -283,7 +323,7 @@ def bisect_resume(args, deployment, repo):
         success = False
 
     # update and write data
-    commit = deployment.get_csum()
+    commit = get_deployed_base_commit(deployment, repo)
     if success:
         for c in reversed(commits_info.keys()):
             commits_info[c]['status'] = 'GOOD' 
