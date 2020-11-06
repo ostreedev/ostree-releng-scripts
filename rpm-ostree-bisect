@@ -98,22 +98,17 @@ def log(msg):
     sys.stdout.flush()
 
 """
-    Find out of the given commitid is a base commit (i.e. no
-    layered packages). We'll cue off of the `rpmostree.clientlayer`
-    metadata for this.
+    Find out of the given commitid is a layered commit (i.e. layered
+    packages). We'll cue off of the `rpmostree.clientlayer` metadata for this.
 """
-def is_base_commit(repo, commitid):
+def is_layered_commit(repo, commitid):
     # Grab commit object. If None then history has been
     # trimmed from the remote and we can break
     _, commit = repo.load_variant_if_exists(
                     OSTree.ObjectType.COMMIT, commitid)
     # Grab version info from commit
     meta = commit.get_child_value(0)
-    clientlayer = meta.lookup_value('rpmostree.clientlayer', GLib.VariantType.new('b'))
-    if clientlayer:
-        return False
-    else:
-        return True
+    return meta.lookup_value('rpmostree.clientlayer', GLib.VariantType.new('b'))
 
 
 """
@@ -123,7 +118,7 @@ def is_base_commit(repo, commitid):
 """
 def get_deployed_base_commit(deployment, repo):
     commitid = deployment.get_csum()
-    if not is_base_commit(repo, commitid):
+    if is_layered_commit(repo, commitid):
         _, commit = repo.load_variant_if_exists(
                         OSTree.ObjectType.COMMIT, commitid)
         commitid = OSTree.commit_get_parent(commit)
