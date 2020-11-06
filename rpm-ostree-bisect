@@ -129,6 +129,18 @@ def get_deployed_base_commit(deployment, repo):
         commitid = OSTree.commit_get_parent(commit)
     return commitid
 
+"""
+    On newer rpm-ostree systems /sysroot has been mounted read-only
+    which means we can't pull commit metadata into the repo. Let's
+    remount it read-write if that's the case.
+"""
+def make_sysroot_readwrite():
+    stat = os.statvfs('/sysroot')
+    readonly = bool(stat.f_flag & os.ST_RDONLY)
+    if readonly:
+        cmd = ['/usr/bin/mount', '-o', 'remount,rw', '/sysroot']
+        subprocess.call(cmd)
+
 
 """ 
     Initialize commit info ordered dict. The array will be a list of 
@@ -432,6 +444,8 @@ def main():
     if deployment is None:
         fatal("Not in a booted OSTree system!")
     _, repo = sysroot.get_repo(None)
+
+    make_sysroot_readwrite()
 
     log("Using data file at: %s" % args.datafile)
 
