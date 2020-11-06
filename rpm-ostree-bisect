@@ -216,11 +216,17 @@ def pull_commit_history(deployment, repo):
     # Get repo, remote and refspec from the booted deployment
     # The refspec in the metadata is either `refspec` if there
     # are no layered packages (i.e. the deployed commit is a base
-    # commit) or `baserefspec` if there are.
+    # commit) or `baserefspec` if there are or ever have been.
+    # Try first for `refspec` and fall back to `baserefspec.
     origin = deployment.get_origin()
-    if is_base_commit(repo, deployment.get_csum()):
+    refspec = ""
+    try:
         refspec = origin.get_string('origin', 'refspec')
-    else:
+    except GLib.Error as e:
+        # If not a "key not found" error then raise the exception
+        if not e.matches(GLib.KeyFile.error_quark(), GLib.KeyFileError.KEY_NOT_FOUND):
+            raise(e)
+        # Fallback to `baserefspec`
         refspec = origin.get_string('origin', 'baserefspec')
     _, remote, ref = OSTree.parse_refspec(refspec)
 
