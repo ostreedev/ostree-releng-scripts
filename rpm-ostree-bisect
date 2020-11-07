@@ -124,18 +124,6 @@ def get_deployed_base_commit(deployment, repo):
         commitid = OSTree.commit_get_parent(commit)
     return commitid
 
-"""
-    On newer rpm-ostree systems /sysroot has been mounted read-only
-    which means we can't pull commit metadata into the repo. Let's
-    remount it read-write if that's the case.
-"""
-def make_sysroot_readwrite():
-    stat = os.statvfs('/sysroot')
-    readonly = bool(stat.f_flag & os.ST_RDONLY)
-    if readonly:
-        cmd = ['/usr/bin/mount', '-o', 'remount,rw', '/sysroot']
-        subprocess.call(cmd)
-
 
 """ 
     Initialize commit info ordered dict. The array will be a list of 
@@ -230,24 +218,12 @@ def pull_commit_history(deployment, repo):
         refspec = origin.get_string('origin', 'baserefspec')
     _, remote, ref = OSTree.parse_refspec(refspec)
 
-    # Build up options array for pull call
-    #   refs (as): Array of string refs
-    #   flags (i): An instance of OSTree.RepoPullFlags
-    #   depth (i): How far in the history to traverse; default is 0, -1 means infinite
-    # More info on Gvariant types:
-    #   https://lazka.github.io/pgi-docs/GLib-2.0/classes/VariantType.html#GLib.VariantType
-    flags = OSTree.RepoPullFlags(2) # COMMIT_ONLY = 2 Only pull commit metadata
-    depth = -1 # -1 means max depth
-    options = GLib.Variant('a{sv}', {
-        'refs': GLib.Variant('as', [ref]),
-        'flags': GLib.Variant('i', flags),
-        'depth': GLib.Variant('i', depth),
-    })
-
-    # Grab commit metadata history for ref from repo
-    progress = OSTree.AsyncProgress.new()
-    #progress2 = OSTree.AsyncProgress.new_and_connect(OSTree.Repo.pull_default_console_progress_changed(progress, None), None)
-    repo.pull_with_options(remote, options, progress, None) 
+    # Run the ostree pull operation. Use the binary here rather than
+    # the Python API because binary will properly remount /sysroot
+    # read/write on systems that have it mounted read-only.
+    cmd = ['/usr/bin/ostree', 'pull',
+                '--commit-metadata-only', '--depth=-1', f'{remote}:{ref}']
+    subprocess.call(cmd)
 
 
 def load_data(datafile):
@@ -445,8 +421,6 @@ def main():
     if deployment is None:
         fatal("Not in a booted OSTree system!")
     _, repo = sysroot.get_repo(None)
-
-    make_sysroot_readwrite()
 
     log("Using data file at: %s" % args.datafile)
 
