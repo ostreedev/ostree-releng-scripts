@@ -50,7 +50,8 @@ def rsync(paths, opts, ignore_missing_args=False):
     subprocess.check_call(argv)
 
 OBJECTS_AND_DELTAS = ['/objects', '/objects/**', '/deltas', '/deltas/**']
-REFS_AND_SUMMARY = ['/refs', '/refs/**', '/summary*']
+REFS_AND_SUMMARY = ['/refs', '/refs/**', '/summary*', '/summaries', '/summaries/**']
+CONFIG = ['/config']
 # We rsync in reverse data dependence order - the summary and refs
 # point to objects + deltas.  Our first pass over the objects doesn't
 # perform any deletions, as that would create race conditions.  We
@@ -59,3 +60,4 @@ rsync(OBJECTS_AND_DELTAS, ['--ignore-existing'])
 rsync(REFS_AND_SUMMARY, ['--delete'])
 # Finally, we handle any deletions for objects and deltas.
 rsync(OBJECTS_AND_DELTAS, ['--ignore-existing', '--delete'])
+rsync(CONFIG, ['--ignore-existing'])
